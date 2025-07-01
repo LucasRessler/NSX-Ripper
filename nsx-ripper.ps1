@@ -22,7 +22,7 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
 [Regex]$GLOBAL:SERVICE_PATH_REGEX = "^$GLOBAL:SERVICES_NSX_PATH/t\d{3}_svc-(.*)$"
 [Regex]$GLOBAL:SECGROUP_PATH_REGEX = "^$GLOBAL:SECGROUP_NSX_PATH/t\d{3}_grp-ips-(.*)$"
 [Regex]$GLOBAL:RULE_NAME_REGEX = '^(t\d{3})_pfw(pay|inet)-([A-Z]{3,6}\d{5,8})([_-](\d+))?[_-]?(.*)$'
-# RULE_NAME Matches : 1 -> Tenant; 3 -> Request-ID; 5 -> Index; 6 -> Description
+# RULE_NAME Matches : 1 -> Tenant; 2 -> Gateway; 3 -> Request-ID; 5 -> Index; 6 -> Description
 
 [String[]]$GLOBAL:EXCLUDE_MATCHES = @("UAN")
 [PSCustomObject[]]$GLOBAL:ANY_DESTINATION = @([PSCustomObject]@{ ipv4 = "ANY" })
@@ -205,6 +205,7 @@ LogInPlace "Fetching policies from NSX"
             rule = $_
             name = $Matches[0]
             tenant = $Matches[1]
+            gateway = $Matches[2]
             request = $Matches[3]
             index = [Int]$Matches[5]
             description = $Matches[6]
@@ -228,7 +229,7 @@ foreach ($rule_data in $rules) {
 # Create a Second Collection by Tenant
 [Hashtable]$tenant_map = @{}
 [PSCustomObject[]]$request_groups = @()
-foreach ($request in $request_map.Keys) {
+foreach ($request in $request_map.Keys | Sort-Object) {
     [Int]$new_index = 1
     [String[]]$tenants = @()
     [PSCustomObject[]]$ripped_rules = @()
@@ -239,6 +240,7 @@ foreach ($request in $request_map.Keys) {
         [PSCustomObject]$rule = [PSCustomObject]@{
             tenant = $tenant
             entry_index = $new_index
+            gateway = $rule_data.gateway
             description = $rule_data.description
             sources = @($deep_ripped.sources)
             services  = @($deep_ripped.services)
@@ -262,6 +264,8 @@ New-Item -Force -ItemType Directory -Path $GLOBAL:RULDP_OUT_DIR | Out-Null
 foreach ($tenant in $tenant_map.Keys) {
     [String]$t_out_path = "$GLOBAL:RULDP_OUT_DIR/FW-Rules-$tenant.xlsx"
     [PSCustomObject[]]$collection = $tenant_map[$tenant]
+    [String]$check_inet = if ($_.gateway -eq "inet") { "X" }
+    [String]$check_pay  = if ($_.gateway -eq "pay")  { "X" }
     LogInPlace "Saving : $t_out_path"
     $collection | ForEach-Object {
         [PSCustomObject]@{
@@ -272,17 +276,19 @@ foreach ($tenant in $tenant_map.Keys) {
             'NSX-Description' = $_.description
             'Request ID' = $_.request
             'CIS ID' = $null
-            'T0 Internet' = $null
-            'T1 Payload' = $null
+            'T0 Internet' = $check_inet
+            'T1 Payload'  = $check_pay
             'Creation Status' = $null
         }
     } | Export-Excel -Path $t_out_path -WorksheetName $GLOBAL:RULDP_WS_RULES -CellStyleSB {
         param ($worksheet)
+        [Int]$cols = 10
         [Int]$lr = $collection.Count + 1
-        $h_range = $worksheet.Cells["A1:J1"]
-        $d_range = $worksheet.Cells["A2:J$lr"]
-        $w_range = $worksheet.Cells["A1:J$lr"]
-        $i_range = $worksheet.Cells["A2:A$lr"]
+        [String]$lc = [Char]([Int][Char]'A' + $cols - 1)
+        $h_range = $worksheet.Cells["A1:${lc}1"]
+        $i_range = $worksheet.Cells["A2:A${lr}"]
+        $d_range = $worksheet.Cells["A2:${lc}${lr}"]
+        $w_range = $worksheet.Cells["A1:${lc}${lr}"]
 
         $h_range.Style.Fill.PatternType = 'Solid'
         $h_range.Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::Yellow)
@@ -290,6 +296,8 @@ foreach ($tenant in $tenant_map.Keys) {
         $i_range.Style.HorizontalAlignment = 'Center'
         $w_range.Style.VerticalAlignment = 'Top'
         $d_range.Style.WrapText = $true
+
+        for ($c = 1; $c -le $cols; $c++) { $worksheet.Column($c).Width = 100 }
         $worksheet.Cells.AutoFitColumns()
     }
 };  $n = $tenant_map.Keys.Count; LogLine "Generated $n Rule-Deployer Excel file$(Pl $n)"
