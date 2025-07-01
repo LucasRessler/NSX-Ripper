@@ -1,3 +1,5 @@
+if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction Stop }
+
 # +--------------------------+
 # | ==> GLOBAL VARIABLES <== |
 # +--------------------------+
@@ -7,12 +9,18 @@
 [String]$GLOBAL:RULDP_OUT_DIR = "$GLOBAL:OUT_DIR\Rule-Deployer"
 [String]$GLOBAL:FILTERED_FILEPATH = "$GLOBAL:OUT_DIR\FilteredRules.txt"
 [String]$GLOBAL:POLICIES_NSX_PATH = 'infra/domains/default/gateway-policies'
+[String]$GLOBAL:SECGROUP_NSX_PATH = 'infra/domains/default/groups'
 [String]$GLOBAL:SERVICES_NSX_PATH = 'infra/services'
+
+[String]$GLOBAL:RULDP_WS_SGRPS = 'TSA-SecurityGroups'
+[String]$GLOBAL:RULDP_WS_SRVCS = 'TSA-Services'
+[String]$GLOBAL:RULDP_WS_RULES = 'TSA-Rules'
 
 [String]$U8_REGEX = '([0-1]?[0-9]{1,2}|2([0-4][0-9]|5[0-5]))'
 [String]$NAT_REGEX = '([1-9]|[1-2][0-9]|3[0-2])'
 [Regex]$GLOBAL:IP_REGEX = "^(($U8_REGEX\.){3}($U8_REGEX))(/($NAT_REGEX))?$"
-[Regex]$GLOBAL:SECGROUP_PATH_REGEX = '^infra/domains/default/groups/t\d{3}_grp-ips-(.*)$'
+[Regex]$GLOBAL:SERVICE_PATH_REGEX = "^$GLOBAL:SERVICES_NSX_PATH/t\d{3}_svc-(.*)$"
+[Regex]$GLOBAL:SECGROUP_PATH_REGEX = "^$GLOBAL:SECGROUP_NSX_PATH/t\d{3}_grp-ips-(.*)$"
 [Regex]$GLOBAL:RULE_NAME_REGEX = '^(t\d{3})_pfw(pay|inet)-([A-Z]{3,6}\d{5,8})([_-](\d+))?[_-]?(.*)$'
 # RULE_NAME Matches : 1 -> Tenant; 3 -> Request-ID; 5 -> Index; 6 -> Description
 
@@ -24,6 +32,10 @@
     [PSCustomObject]@{ protocol = "UDP";  port = "1-65535" }
     [PSCustomObject]@{ protocol = "ICMP"; port = "8"       }
 )
+
+[PSCustomObject]$GLOBAL:ANY_DESTINATION_DATA = [PSCustomObject]@{ grp_name = "ANY"; resolved = $GLOBAL:ANY_DESTINATION }
+[PSCustomObject]$GLOBAL:ANY_SOURCE_DATA = [PSCustomObject]@{ grp_name = "ANY"; resolved = $GLOBAL:ANY_SOURCE }
+[PSCustomObject]$GLOBAL:ANY_SERVICE_DATA = [PSCustomObject]@{ svc_name = "ANY"; resolved = $GLOBAL:ANY_SERVICE }
 
 
 # +---------------+
@@ -115,22 +127,19 @@ class NsxApiHandle {
     # Format a given Security Group for CIS
     [PSCustomObject]RipSecurityGroup ([String]$secgroup_path) {
         [String]$grp_name = if ($secgroup_path -match $GLOBAL:SECGROUP_PATH_REGEX) { $Matches[1] }
-        [String[]]$addrs = $this.RipSecurityGroupAddrs($secgroup_path)
-        return [PSCustomObject]@{
-            resolved = @($addrs | ForEach-Object { [PSCustomObject]@{ ipv4 = $_ } })
-            grp_name = $grp_name
-        }
+        [PSCustomObject[]]$addrs = $this.RipSecurityGroupAddrs($secgroup_path) | ForEach-Object { [PSCustomObject]@{ ipv4 = $_ } }
+        return [PSCustomObject]@{ resolved = @($addrs); grp_name = $grp_name }
     }
 
     # Format a given Source Group for CIS
     [PSCustomObject]RipSourceGroup ([String]$secgroup_path) {
-        if ($secgroup_path -eq "ANY") { return [PSCustomObject]@{ resolved = $GLOBAL:ANY_SOURCE } }
+        if ($secgroup_path -eq "ANY") { return $GLOBAL:ANY_SOURCE_DATA }
         return $this.RipSecurityGroup($secgroup_path)
     }
 
     # Format a given Destination Group for CIS
     [PSCustomObject]RipDestinationGroup ([String]$secgroup_path) {
-        if ($secgroup_path -eq "ANY") { return [PSCustomObject]@{ resolved = $GLOBAL:ANY_DESTINATION } }
+        if ($secgroup_path -eq "ANY") { return $GLOBAL:ANY_DESTINATION_DATA }
         return $this.RipSecurityGroup($secgroup_path)
     }
 
@@ -148,11 +157,10 @@ class NsxApiHandle {
 
     # Format a given Service for CIS
     [PSCustomObject]RipService ([String]$service_path) {
-        if ($service_path -eq "ANY") { return [PSCustomObject]@{ resolved = $GLOBAL:ANY_SERVICE } }
-        return [PSCustomObject]@{
-            resolved = $this.RipServicePorts($service_path)
-            svc_name = $service_path.Trim("$GLOBAL:SERVICES_NSX_PATH/")
-        }
+        if ($service_path -eq "ANY") { return $GLOBAL:ANY_SERVICE_DATA }
+        [String]$svc_name = if ($service_path -match $GLOBAL:SERVICE_PATH_REGEX) { $Matches[1] }
+        [PSCustomObject[]]$ports = $this.RipServicePorts($service_path)
+        return [PSCustomObject]@{ resolved = @($ports); svc_name = $svc_name }
     }
 
     # Format Security Groups + Services of a given Rule for CIS
@@ -217,6 +225,8 @@ foreach ($rule_data in $rules) {
 };  $n = $request_map.Keys.Count; LogLine "Created $n request group$(Pl $n)"
 
 # Deep-Rip Request ID Groups
+# Create a Second Collection by Tenant
+[Hashtable]$tenant_map = @{}
 [PSCustomObject[]]$request_groups = @()
 foreach ($request in $request_map.Keys) {
     [Int]$new_index = 1
@@ -224,22 +234,63 @@ foreach ($request in $request_map.Keys) {
     [PSCustomObject[]]$ripped_rules = @()
     foreach ($rule_data in $request_map[$request] | Sort-Object -Property index) {
         LogInPlace "Deep-ripping rules for $request : $($rule_data.rule.display_name)"
-        if ($rule_data.tenant -notin $tenants) { $tenants += $rule_data.tenant }
+        [String]$tenant = $rule_data.tenant
         [PSCustomObject]$deep_ripped = $handle.DeepRip($rule_data.rule)
-        $ripped_rules += [PSCustomObject]@{
-            tenant = $rule_data.tenant
+        [PSCustomObject]$rule = [PSCustomObject]@{
+            tenant = $tenant
             entry_index = $new_index
             description = $rule_data.description
             sources = @($deep_ripped.sources)
             services  = @($deep_ripped.services)
             destinations = @($deep_ripped.destinations)
-        };  $new_index += 1
+            request = $request
+        }
+        if ($tenant -notin $tenants) { $tenants += $tenant }
+        if ($tenant_map[$tenant]) { $tenant_map[$tenant] += $rule }
+        else { $tenant_map[$tenant] = @($rule) }
+        $ripped_rules += $rule
+        $new_index += 1
     }; $request_groups += [PSCustomObject]@{
         rules = $ripped_rules
         request = $request
         tenants = $tenants
     }
-}
+};  $n = $tenant_map.Keys.Count; LogLine "Created $n tenant collection$(Pl $n)"
+
+# Save each Tenant Collection as a Rule-Deployer Excel File
+New-Item -Force -ItemType Directory -Path $GLOBAL:RULDP_OUT_DIR | Out-Null
+foreach ($tenant in $tenant_map.Keys) {
+    [String]$t_out_path = "$GLOBAL:RULDP_OUT_DIR/FW-Rules-$tenant.xlsx"
+    [PSCustomObject[]]$collection = $tenant_map[$tenant]
+    LogInPlace "Saving : $t_out_path"
+    $collection | ForEach-Object {
+        [PSCustomObject]@{
+            'Index' = $_.entry_index
+            'NSX-Source' = @($_.sources | ForEach-Object { $_.grp_name }) -join "`r`n"
+            'NSX-Destination' = @($_.destinations | ForEach-Object { $_.grp_name }) -join "`r`n"
+            'NSX-Service' = @($_.services | ForEach-Object { $_.svc_name }) -join "`r`n"
+            'NSX-Description' = $_.description
+            'Request ID' = $_.request
+            'CIS ID' = $null
+            'T0 Internet' = $null
+            'T1 Payload' = $null
+            'Creation Status' = $null
+        }
+    } | Export-Excel -Path $t_out_path -WorksheetName $GLOBAL:RULDP_WS_RULES -CellStyleSB {
+        param ($worksheet)
+        [Int]$lr = $collection.Count + 1
+        $h_range = $worksheet.Cells["A1:J1"]
+        $d_range = $worksheet.Cells["A2:J$lr"]
+        $w_range = $worksheet.Cells["A1:J$lr"]
+
+        $h_range.Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::Yellow)
+        $h_range.Style.Fill.PatternType = 'Solid'
+        $w_range.Style.VerticalAlignment = 'Top'
+        $w_range.Style.HorizontalAlignment = 'Center'
+        $d_range.Style.WrapText = $true
+        $worksheet.Cells.AutoFitColumns()
+    }
+};  $n = $tenant_map.Keys.Count; LogLine "Generated $n Rule-Deployer Excel file$(Pl $n)"
 
 # Build Naive Tenant Groups
 [String[]]$tenant_list = @()
@@ -262,21 +313,21 @@ foreach ($g in $naive_groups.Values) {
 # Find Actual Tenant Groups
 [Hashtable]$visited = @{}
 [String[][]]$tenant_groups = @()
-[Hashtable]$tenant_map = @{}
+[Hashtable]$tenant_group_map = @{}
 function recurse_group_tenant {
     param ([String]$tenant)
     if ($visited[$tenant]) { return $null } else { $visited[$tenant] = $true }
     return @($tenant; ($tenant_graph[$tenant].Keys | ForEach-Object { recurse_group_tenant $_ } | Where-Object { $_ }))
 };  foreach ($t in $tenant_graph.Keys) { [String[]]$g = recurse_group_tenant $t | Sort-Object; if ($g.Count) { $tenant_groups += ,$g } }
-foreach ($g in $tenant_groups) { [String]$k = $g -join "_"; foreach ($t in $g) { $tenant_map[$t] = $k } }
+foreach ($g in $tenant_groups) { [String]$k = $g -join "_"; foreach ($t in $g) { $tenant_group_map[$t] = $k } }
 
 # Build up Final Groups
 [Hashtable]$final_groups = @{}
 foreach ($tn in $naive_groups.Keys) {
-    [String]$k = $tenant_map[($naive_groups[$tn][0].tenants[0])]
+    [String]$k = $tenant_group_map[($naive_groups[$tn][0].tenants[0])]
     if (-not $final_groups[$k]) { $final_groups[$k] = $naive_groups[$tn] }
     else { $final_groups[$k] += $naive_groups[$tn] }
-};  $n = $final_groups.Keys.Count; LogLine "Created $n tenant group$(Pl $n)"
+}
 
 # Save all Grouped Rules as individual CIS JSON-Requests
 [Int]$number_of_generated_files = 0
@@ -293,7 +344,7 @@ foreach ($tenant_s in $final_groups.Keys) {
         [PSCustomObject[]]$rules = @()
         foreach ($rule in $request_data.rules) {
             $svc_groups += $rule.services | ForEach-Object {
-                $_.svc_name + ": " + (@($_.resolved | ForEach-Object { $_.protocol + ":" + $_.port }) -join ", ")
+                if ($_.svc_name) { $_.svc_name + ": " + (@($_.resolved | ForEach-Object { $_.protocol + ":" + $_.port }) -join ", ") }
             }
             $sec_groups += @($rule.sources; $rule.destinations) | ForEach-Object {
                 if ($_.grp_name) { $_.grp_name + ": " + (@($_.resolved | ForEach-Object { $_.ipv4 }) -join ", ") }
@@ -321,7 +372,7 @@ foreach ($tenant_s in $final_groups.Keys) {
         } | ConvertTo-Json -Depth 8 -Compress | Set-Content -Path $r_out_path
         $number_of_generated_files += 1
     }
-}; $n = $number_of_generated_files; LogLine "Generated $n file$(Pl $n)!"
+}; $n = $number_of_generated_files; LogLine "Generated $n CIS-json file$(Pl $n)"
 
 # TODO:
 # - [x] Convert ANY (Service)
@@ -345,7 +396,7 @@ foreach ($tenant_s in $final_groups.Keys) {
 # - [x] UAN in name -> filter away
 # - [x] Sort by enty index *numerically*
 # - [x] req_comment: Add unresolved Security and Service Groups
-# - [ ] Build up ruledeployer style Excel Sheets (one per tenant! Use naive groups?)
+# - [~] Build up ruledeployer style Excel Sheets (one per tenant!)
 
 # IMPORTANT: Change to literal "ANY" for security groups
 #            Service Group in descritpion
