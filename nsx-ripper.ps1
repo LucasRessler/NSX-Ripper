@@ -212,7 +212,7 @@ LogInPlace "Fetching policies from NSX"
     } else { $unused_log += $_.display_name }
 };  New-Item -ItemType Directory -Force $GLOBAL:OUT_DIR | Out-Null
 ($unused_log | Sort-Object | Select-Object -Unique) -join "`r`n" `
-| Set-Content $GLOBAL:FILTERED_FILEPATH
+| Out-File -FilePath $GLOBAL:FILTERED_FILEPATH -Encoding UTF8
 $n = $rules.Count; LogLine "Collected $n rule$(Pl $n), filtered out $($unused_log.Count)"
 
 # Group Rules by respective Request ID
@@ -282,11 +282,13 @@ foreach ($tenant in $tenant_map.Keys) {
         $h_range = $worksheet.Cells["A1:J1"]
         $d_range = $worksheet.Cells["A2:J$lr"]
         $w_range = $worksheet.Cells["A1:J$lr"]
+        $i_range = $worksheet.Cells["A2:A$lr"]
 
-        $h_range.Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::Yellow)
         $h_range.Style.Fill.PatternType = 'Solid'
+        $h_range.Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::Yellow)
+        $h_range.Style.HorizontalAlignment = 'Center'
+        $i_range.Style.HorizontalAlignment = 'Center'
         $w_range.Style.VerticalAlignment = 'Top'
-        $w_range.Style.HorizontalAlignment = 'Center'
         $d_range.Style.WrapText = $true
         $worksheet.Cells.AutoFitColumns()
     }
@@ -349,7 +351,7 @@ foreach ($tenant_s in $final_groups.Keys) {
             $sec_groups += @($rule.sources; $rule.destinations) | ForEach-Object {
                 if ($_.grp_name) { $_.grp_name + ": " + (@($_.resolved | ForEach-Object { $_.ipv4 }) -join ", ") }
             }
-            $rules += [PSCUstomObject]@{
+            $rules += [PSCustomObject]@{
                 description = $rule.description
                 entry_index = $rule.entry_index
                 rel_services = @($rule.services | ForEach-Object { $_.resolved })
@@ -369,10 +371,12 @@ foreach ($tenant_s in $final_groups.Keys) {
             fw_cust_rules_ipv6 = @()
             fw_cust_rules_ipv4 = @($rules)
             req_comment = $comment
-        } | ConvertTo-Json -Depth 8 -Compress | Set-Content -Path $r_out_path
+        } | ConvertTo-Json -Depth 8 -Compress `
+          | Out-File -FilePath $r_out_path -Encoding UTF8
         $number_of_generated_files += 1
     }
 }; $n = $number_of_generated_files; LogLine "Generated $n CIS-json file$(Pl $n)"
+LogLine "Done!"
 
 # TODO:
 # - [x] Convert ANY (Service)
