@@ -264,10 +264,10 @@ New-Item -Force -ItemType Directory -Path $GLOBAL:RULDP_OUT_DIR | Out-Null
 foreach ($tenant in $tenant_map.Keys) {
     [String]$t_out_path = "$GLOBAL:RULDP_OUT_DIR/FW-Rules-$tenant.xlsx"
     [PSCustomObject[]]$collection = $tenant_map[$tenant]
-    [String]$check_inet = if ($_.gateway -eq "inet") { "X" }
-    [String]$check_pay  = if ($_.gateway -eq "pay")  { "X" }
     LogInPlace "Saving : $t_out_path"
     $collection | ForEach-Object {
+        [String]$check_inet = if ($_.gateway -eq "inet") { "X" }
+        [String]$check_pay  = if ($_.gateway -eq "pay")  { "X" }
         [PSCustomObject]@{
             'Index' = $_.entry_index
             'NSX-Source' = @($_.sources | ForEach-Object { $_.grp_name }) -join "`r`n"
