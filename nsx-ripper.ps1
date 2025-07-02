@@ -1,5 +1,6 @@
 if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction Stop }
 
+
 # +--------------------------+
 # | ==> GLOBAL VARIABLES <== |
 # +--------------------------+
@@ -35,8 +36,8 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
     [PSCustomObject]@{ protocol = "ICMP"; port = "8"       }
 )
 
-[PSCustomObject]$GLOBAL:ANY_DESTINATION_DATA = [PSCustomObject]@{ grp_name = "Any"; resolved = $GLOBAL:ANY_DESTINATION }
-[PSCustomObject]$GLOBAL:ANY_SOURCE_DATA = [PSCustomObject]@{ grp_name = "Any"; resolved = $GLOBAL:ANY_SOURCE }
+[PSCustomObject]$GLOBAL:ANY_DESTINATION_DATA = [PSCustomObject]@{ abstract = "Any"; resolved = $GLOBAL:ANY_DESTINATION }
+[PSCustomObject]$GLOBAL:ANY_SOURCE_DATA = [PSCustomObject]@{ abstract = "Any"; resolved = $GLOBAL:ANY_SOURCE }
 [PSCustomObject]$GLOBAL:ANY_SERVICE_DATA = [PSCustomObject]@{ svc_name = "Any"; resolved = $GLOBAL:ANY_SERVICE }
 
 
@@ -132,7 +133,8 @@ class NsxApiHandle {
         else { $this.ApiGet($secgroup_path).display_name }
         if ($grp_name -match $GLOBAL:SECGROUP_NAME_REGEX) { $grp_name = $Matches[1] }
         [PSCustomObject[]]$addrs = $this.RipSecurityGroupAddrs($secgroup_path) | ForEach-Object { [PSCustomObject]@{ ipv4 = $_ } }
-        return [PSCustomObject]@{ resolved = @($addrs); grp_name = $grp_name }
+        [String]$abstract = if ($grp_name) { $grp_name } else { ($addrs | ForEach-Object { $_.ipv4 }) -join "`r`n" }
+        return [PSCustomObject]@{ resolved = @($addrs); grp_name = $grp_name; abstract = $abstract }
     }
 
     # Format a given Source Group for CIS
@@ -276,8 +278,8 @@ foreach ($tenant in $tenant_map.Keys) {
         [String]$check_pay  = if ($_.gateway -eq "pay")  { "X" }
         [PSCustomObject]@{
             'Index' = $_.entry_index
-            'NSX-Source' = @($_.sources | ForEach-Object { $_.grp_name }) -join "`r`n"
-            'NSX-Destination' = @($_.destinations | ForEach-Object { $_.grp_name }) -join "`r`n"
+            'NSX-Source' = @($_.sources | ForEach-Object { $_.abstract }) -join "`r`n"
+            'NSX-Destination' = @($_.destinations | ForEach-Object { $_.abstract }) -join "`r`n"
             'NSX-Service' = @($_.services | ForEach-Object { $_.svc_name }) -join "`r`n"
             'NSX-Description' = $_.description
             'Request ID' = $_.request
