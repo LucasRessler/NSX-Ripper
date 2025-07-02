@@ -12,6 +12,8 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
 [String]$GLOBAL:SECGROUP_NSX_PATH = 'infra/domains/default/groups'
 [String]$GLOBAL:SERVICES_NSX_PATH = 'infra/services'
 
+[System.Drawing.Color]$GLOBAL:EXCEL_FILLTHIS_BG_COLOR = [System.Drawing.ColorTranslator]::FromHtml("#FCC060")
+[System.Drawing.Color]$GLOBAL:EXCEL_HEADER_BG_COLOR = [System.Drawing.Color]::Yellow
 [String]$GLOBAL:RULDP_WS_SGRPS = 'TSA-SecurityGroups'
 [String]$GLOBAL:RULDP_WS_SRVCS = 'TSA-Services'
 [String]$GLOBAL:RULDP_WS_RULES = 'TSA-Rules'
@@ -19,9 +21,9 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
 [String]$U8_REGEX = '([0-1]?[0-9]{1,2}|2([0-4][0-9]|5[0-5]))'
 [String]$NAT_REGEX = '([1-9]|[1-2][0-9]|3[0-2])'
 [Regex]$GLOBAL:IP_REGEX = "^(($U8_REGEX\.){3}($U8_REGEX))(/($NAT_REGEX))?$"
-[Regex]$GLOBAL:SERVICE_PATH_REGEX = "^$GLOBAL:SERVICES_NSX_PATH/t\d{3}_svc-(.*)$"
-[Regex]$GLOBAL:SECGROUP_PATH_REGEX = "^$GLOBAL:SECGROUP_NSX_PATH/t\d{3}_grp-ips-(.*)$"
-[Regex]$GLOBAL:RULE_NAME_REGEX = '^(t\d{3})_pfw(pay|inet)-([A-Z]{3,6}\d{5,8})([_-](\d+))?[_-]?(.*)$'
+[Regex]$GLOBAL:SECGROUP_NAME_REGEX = "^t\d{3}_grp-ips-(.+)$"
+[Regex]$GLOBAL:SERVICE_NAME_REGEX = "^t\d{3}_svc-(.+)$"
+[Regex]$GLOBAL:RULE_NAME_REGEX = '^(t\d{3})_pfw(pay|inet)-([A-Z]{3,6}\d{5,8})[_-]+((\d+)[_-]+)?(.*)$'
 # RULE_NAME Matches : 1 -> Tenant; 2 -> Gateway; 3 -> Request-ID; 5 -> Index; 6 -> Description
 
 [String[]]$GLOBAL:EXCLUDE_MATCHES = @("UAN")
@@ -33,9 +35,9 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
     [PSCustomObject]@{ protocol = "ICMP"; port = "8"       }
 )
 
-[PSCustomObject]$GLOBAL:ANY_DESTINATION_DATA = [PSCustomObject]@{ grp_name = "ANY"; resolved = $GLOBAL:ANY_DESTINATION }
-[PSCustomObject]$GLOBAL:ANY_SOURCE_DATA = [PSCustomObject]@{ grp_name = "ANY"; resolved = $GLOBAL:ANY_SOURCE }
-[PSCustomObject]$GLOBAL:ANY_SERVICE_DATA = [PSCustomObject]@{ svc_name = "ANY"; resolved = $GLOBAL:ANY_SERVICE }
+[PSCustomObject]$GLOBAL:ANY_DESTINATION_DATA = [PSCustomObject]@{ grp_name = "Any"; resolved = $GLOBAL:ANY_DESTINATION }
+[PSCustomObject]$GLOBAL:ANY_SOURCE_DATA = [PSCustomObject]@{ grp_name = "Any"; resolved = $GLOBAL:ANY_SOURCE }
+[PSCustomObject]$GLOBAL:ANY_SERVICE_DATA = [PSCustomObject]@{ svc_name = "Any"; resolved = $GLOBAL:ANY_SERVICE }
 
 
 # +---------------+
@@ -126,7 +128,9 @@ class NsxApiHandle {
 
     # Format a given Security Group for CIS
     [PSCustomObject]RipSecurityGroup ([String]$secgroup_path) {
-        [String]$grp_name = if ($secgroup_path -match $GLOBAL:SECGROUP_PATH_REGEX) { $Matches[1] }
+        [String]$grp_name = if ($secgroup_path -match $GLOBAL:IP_REGEX) { $null }
+        else { $this.ApiGet($secgroup_path).display_name }
+        if ($grp_name -match $GLOBAL:SECGROUP_NAME_REGEX) { $grp_name = $Matches[1] }
         [PSCustomObject[]]$addrs = $this.RipSecurityGroupAddrs($secgroup_path) | ForEach-Object { [PSCustomObject]@{ ipv4 = $_ } }
         return [PSCustomObject]@{ resolved = @($addrs); grp_name = $grp_name }
     }
@@ -158,7 +162,8 @@ class NsxApiHandle {
     # Format a given Service for CIS
     [PSCustomObject]RipService ([String]$service_path) {
         if ($service_path -eq "ANY") { return $GLOBAL:ANY_SERVICE_DATA }
-        [String]$svc_name = if ($service_path -match $GLOBAL:SERVICE_PATH_REGEX) { $Matches[1] }
+        [String]$svc_name = $this.ApiGet($service_path).display_name
+        if ($svc_name -match $GLOBAL:SERVICE_NAME_REGEX) { $svc_name = $Matches[1] }
         [PSCustomObject[]]$ports = $this.RipServicePorts($service_path)
         return [PSCustomObject]@{ resolved = @($ports); svc_name = $svc_name }
     }
@@ -264,6 +269,7 @@ New-Item -Force -ItemType Directory -Path $GLOBAL:RULDP_OUT_DIR | Out-Null
 foreach ($tenant in $tenant_map.Keys) {
     [String]$t_out_path = "$GLOBAL:RULDP_OUT_DIR/FW-Rules-$tenant.xlsx"
     [PSCustomObject[]]$collection = $tenant_map[$tenant]
+    if ($collection.Count -eq 0) { continue }
     LogInPlace "Saving : $t_out_path"
     $collection | ForEach-Object {
         [String]$check_inet = if ($_.gateway -eq "inet") { "X" }
@@ -287,23 +293,34 @@ foreach ($tenant in $tenant_map.Keys) {
         [String]$lc = [Char]([Int][Char]'A' + $cols - 1)
         $h_range = $worksheet.Cells["A1:${lc}1"]
         $i_range = $worksheet.Cells["A2:A${lr}"]
-        $d_range = $worksheet.Cells["A2:${lc}${lr}"]
-        $w_range = $worksheet.Cells["A1:${lc}${lr}"]
+        $w_range = $worksheet.Cells["B2:D${lr}"]
+        $gw_range = $worksheet.Cells["H2:I${lr}"]
+        $cid_range = $worksheet.Cells["G2:G${lr}"]
+        $a_range = $worksheet.Cells["A1:${lc}${lr}"]
 
-        $h_range.Style.Fill.PatternType = 'Solid'
-        $h_range.Style.Fill.BackgroundColor.SetColor([System.Drawing.Color]::Yellow)
+        $a_range.Style.VerticalAlignment = 'Top'
         $h_range.Style.HorizontalAlignment = 'Center'
         $i_range.Style.HorizontalAlignment = 'Center'
-        $w_range.Style.VerticalAlignment = 'Top'
-        $d_range.Style.WrapText = $true
+        $cid_range.Style.HorizontalAlignment = 'Center'
+        $gw_range.Style.HorizontalAlignment = 'Center'
+        $gw_range.Style.VerticalAlignment = 'Center'
 
-        for ($c = 1; $c -le $cols; $c++) { $worksheet.Column($c).Width = 100 }
+        $h_range.Style.Font.Bold = $true
+        $h_range.Style.Fill.PatternType = 'Solid'
+        $h_range.Style.Fill.BackgroundColor.SetColor($GLOBAL:EXCEL_HEADER_BG_COLOR)
+
+        $cf = $cid_range.ConditionalFormatting.AddExpression()
+        $cf.Formula = 'ISBLANK(G2)'
+        $cf.Style.Fill.PatternType = 'Solid'
+        $cf.Style.Fill.BackgroundColor.Color = $GLOBAL:EXCEL_FILLTHIS_BG_COLOR
+    
         $worksheet.Cells.AutoFitColumns()
+        $worksheet.Column(7).Width = 12
+        $w_range.Style.WrapText = $true
     }
 };  $n = $tenant_map.Keys.Count; LogLine "Generated $n Rule-Deployer Excel file$(Pl $n)"
 
 # Build Naive Tenant Groups
-[String[]]$tenant_list = @()
 [Hashtable]$naive_groups = @{}
 foreach ($r in $request_groups) {
     [String]$k = $r.tenants -join "_"
@@ -354,10 +371,10 @@ foreach ($tenant_s in $final_groups.Keys) {
         [PSCustomObject[]]$rules = @()
         foreach ($rule in $request_data.rules) {
             $svc_groups += $rule.services | ForEach-Object {
-                if ($_.svc_name) { $_.svc_name + ": " + (@($_.resolved | ForEach-Object { $_.protocol + ":" + $_.port }) -join ", ") }
+                if ($_.svc_name) { $_.svc_name + " : " + (@($_.resolved | ForEach-Object { $_.protocol + ":" + $_.port }) -join ", ") }
             }
             $sec_groups += @($rule.sources; $rule.destinations) | ForEach-Object {
-                if ($_.grp_name) { $_.grp_name + ": " + (@($_.resolved | ForEach-Object { $_.ipv4 }) -join ", ") }
+                if ($_.grp_name) { $_.grp_name + " : " + (@($_.resolved | ForEach-Object { $_.ipv4 }) -join ", ") }
             }
             $rules += [PSCustomObject]@{
                 description = $rule.description
@@ -408,7 +425,8 @@ LogLine "Done!"
 # - [x] UAN in name -> filter away
 # - [x] Sort by enty index *numerically*
 # - [x] req_comment: Add unresolved Security and Service Groups
-# - [~] Build up ruledeployer style Excel Sheets (one per tenant!)
+# - [x] Build up ruledeployer style Excel Sheets (one per tenant!)
+# - [ ] How are we gonna resolve literal IPs? New Groups?
 
 # IMPORTANT: Change to literal "ANY" for security groups
 #            Service Group in descritpion
