@@ -22,8 +22,8 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
 [String]$U8_REGEX = '([0-1]?[0-9]{1,2}|2([0-4][0-9]|5[0-5]))'
 [String]$NAT_REGEX = '([1-9]|[1-2][0-9]|3[0-2])'
 [Regex]$GLOBAL:IP_REGEX = "^(($U8_REGEX\.){3}($U8_REGEX))(/($NAT_REGEX))?$"
-[Regex]$GLOBAL:SECGROUP_NAME_REGEX = "^t\d{3}_grp-ips-(.+)$"
 [Regex]$GLOBAL:SERVICE_NAME_REGEX = "^t\d{3}_svc-(.+)$"
+[Regex]$GLOBAL:SECGROUP_NAME_REGEX = "^t\d{3}_grp-(vm|nsm|nest|ips)-(.+)$"
 [Regex]$GLOBAL:RULE_NAME_REGEX = '^(t\d{3})_pfw(pay|inet)-([A-Z]{3,6}\d{5,8})[_-]+((\d+)[_-]+)?(.*)$'
 # RULE_NAME Matches : 1 -> Tenant; 2 -> Gateway; 3 -> Request-ID; 5 -> Index; 6 -> Description
 
@@ -86,6 +86,7 @@ class NsxApiHandle {
     [String]$base_url
     [Hashtable]$headers
     [Hashtable]$cache = @{}
+    [Int]$timeout_sec = 5
 
     NsxApiHandle ([String]$base_url) {
         if (-not $base_url)         { throw "NSX Host Domain was not provided" }
@@ -103,7 +104,7 @@ class NsxApiHandle {
     [PSCustomObject] ApiGet ([String]$path) {
         if ($null -eq $this.cache[$path]) {
             [String]$url = "$($this.base_url)/api/v1/$path"
-            $this.cache[$path] = Invoke-RestMethod -Method Get -Uri $url -Headers $this.headers
+            $this.cache[$path] = Invoke-RestMethod -Method Get -Uri $url -Headers $this.headers -TimeoutSec $this.timeout_sec
         }; return $this.cache[$path]
     }
 
@@ -131,7 +132,11 @@ class NsxApiHandle {
     [PSCustomObject]RipSecurityGroup ([String]$secgroup_path) {
         [String]$grp_name = if ($secgroup_path -match $GLOBAL:IP_REGEX) { $null }
         else { $this.ApiGet($secgroup_path).display_name }
-        if ($grp_name -match $GLOBAL:SECGROUP_NAME_REGEX) { $grp_name = $Matches[1] }
+        if ($grp_name -match $GLOBAL:SECGROUP_NAME_REGEX) { $grp_name = $Matches[2]; switch ($Matches[1]) {
+            ("vm")   { $grp_name += " (VM)"      }
+            ("nsm")  { $grp_name += " (SEGMENT)" }
+            ("nest") { $grp_name += " (GROUP)"   }
+        } }
         [PSCustomObject[]]$addrs = $this.RipSecurityGroupAddrs($secgroup_path) | ForEach-Object { [PSCustomObject]@{ ipv4 = $_ } }
         [String]$abstract = if ($grp_name) { $grp_name } else { ($addrs | ForEach-Object { $_.ipv4 }) -join "`r`n" }
         return [PSCustomObject]@{ resolved = @($addrs); grp_name = $grp_name; abstract = $abstract }
@@ -196,11 +201,13 @@ Get-Content -Path "$PSScriptRoot\.env" | ForEach-Object {
     }
 }
 
+try {
 # Fetch all Rules and filter by specified Format
 LogInPlace "Fetching policies from NSX"
 [String[]]$unused_log = @()
 [NsxApiHandle]$handle = [NsxApiHandle]::New($env:nsx_host)
-[PSCustomObject[]]$rules = $handle.AllPolicies() | ForEach-Object {
+[PSCustomObject[]]$policies = $handle.AllPolicies()
+[PSCustomObject[]]$rules = $policies | ForEach-Object {
     [String]$policy = $_
     LogInPlace "Fetching rules from policy : $policy"
     $handle.AllRulesInPolicy($policy)
@@ -267,6 +274,7 @@ foreach ($request in $request_map.Keys | Sort-Object) {
 };  $n = $tenant_map.Keys.Count; LogLine "Created $n tenant collection$(Pl $n)"
 
 # Save each Tenant Collection as a Rule-Deployer Excel File
+[Int]$number_of_generated_excel_files = 0
 New-Item -Force -ItemType Directory -Path $GLOBAL:RULDP_OUT_DIR | Out-Null
 foreach ($tenant in $tenant_map.Keys) {
     [String]$t_out_path = "$GLOBAL:RULDP_OUT_DIR/FW-Rules-$tenant.xlsx"
@@ -316,11 +324,13 @@ foreach ($tenant in $tenant_map.Keys) {
         $cf.Style.Fill.PatternType = 'Solid'
         $cf.Style.Fill.BackgroundColor.Color = $GLOBAL:EXCEL_FILLTHIS_BG_COLOR
     
+        $w_range.Style.WrapText = $false
         $worksheet.Cells.AutoFitColumns()
         $worksheet.Column(7).Width = 12
         $w_range.Style.WrapText = $true
     }
-};  $n = $tenant_map.Keys.Count; LogLine "Generated $n Rule-Deployer Excel file$(Pl $n)"
+    $number_of_generated_excel_files += 1
+};  $n = $number_of_generated_excel_files; LogLine "Generated $n Rule-Deployer Excel file$(Pl $n)"
 
 # Build Naive Tenant Groups
 [Hashtable]$naive_groups = @{}
@@ -404,8 +414,8 @@ foreach ($tenant_s in $final_groups.Keys) {
     }
 }; $n = $number_of_generated_files; LogLine "Generated $n CIS-json file$(Pl $n)"
 LogLine "Done!"
+} catch { $Host.UI.WriteErrorLine($_.Exception.Message); exit 1 }
 
-# TODO:
 # - [x] Convert ANY (Service)
 #       --------------
 #       TCP  : 1-65535
