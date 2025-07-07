@@ -438,7 +438,8 @@ LogLine "Done!"
 # - [x] Sort by enty index *numerically*
 # - [x] req_comment: Add unresolved Security and Service Groups
 # - [x] Build up ruledeployer style Excel Sheets (one per tenant!)
-# - [ ] How are we gonna resolve literal IPs? New Groups?
+# - [x] How are we gonna resolve literal IPs? New Groups?
+#       ANSWER: Case by case. There's like 2 instances of this
 
 # IMPORTANT: Change to literal "ANY" for security groups
 #            Service Group in descritpion
