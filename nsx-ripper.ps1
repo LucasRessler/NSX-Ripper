@@ -1,6 +1,5 @@
 if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction Stop }
 
-
 # +--------------------------+
 # | ==> GLOBAL VARIABLES <== |
 # +--------------------------+
@@ -15,9 +14,9 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
 
 [System.Drawing.Color]$GLOBAL:EXCEL_FILLTHIS_BG_COLOR = [System.Drawing.ColorTranslator]::FromHtml("#FCC060")
 [System.Drawing.Color]$GLOBAL:EXCEL_HEADER_BG_COLOR = [System.Drawing.Color]::Yellow
-[String]$GLOBAL:RULDP_WS_SGRPS = 'TSA-SecurityGroups'
-[String]$GLOBAL:RULDP_WS_SRVCS = 'TSA-Services'
-[String]$GLOBAL:RULDP_WS_RULES = 'TSA-Rules'
+[String]$GLOBAL:RULDP_WS_SGRPS = 'SecurityGroups'
+[String]$GLOBAL:RULDP_WS_SRVCS = 'Services'
+[String]$GLOBAL:RULDP_WS_RULES = 'Rules'
 
 [String]$U8_REGEX = '([0-1]?[0-9]{1,2}|2([0-4][0-9]|5[0-5]))'
 [String]$NAT_REGEX = '([1-9]|[1-2][0-9]|3[0-2])'
@@ -27,7 +26,7 @@ if ($null -eq (Get-Module ImportExcel)) { Import-Module ImportExcel -ErrorAction
 [Regex]$GLOBAL:RULE_NAME_REGEX = '^(t\d{3})_pfw(pay|inet)-([A-Z]{3,6}\d{5,8})[_-]+((\d+)[_-]+)?(.*)$'
 # RULE_NAME Matches : 1 -> Tenant; 2 -> Gateway; 3 -> Request-ID; 5 -> Index; 6 -> Description
 
-[String[]]$GLOBAL:EXCLUDE_MATCHES = @("UAN")
+[String[]]$GLOBAL:EXCLUDE_MATCHES = @("UAN", "IDC\d{4,8}_\d+")
 [PSCustomObject[]]$GLOBAL:ANY_DESTINATION = @([PSCustomObject]@{ ipv4 = "ANY" })
 [PSCustomObject[]]$GLOBAL:ANY_SOURCE = @([PSCustomObject]@{ ipv4 = "ANY" })
 [PSCustomObject[]]$GLOBAL:ANY_SERVICE = @(
@@ -64,6 +63,41 @@ function LogLine {
     LogInPlace $message; Write-Host $null
 }
 
+# Checks two objects for recursive equality
+function DeepEqual {
+    param ([Object]$obj_a, [Object]$obj_b)
+    if ($obj_a -is [Hashtable] -and $obj_b -is [Hashtable]) {
+        [String[]]$ks_a = $obj_a.Keys | Sort-Object
+        [String[]]$ks_b = $obj_b.Keys | Sort-Object
+        if (-not (DeepEqual $ks_a $ks_b)) { return $false }
+        foreach ($k in $ks_a) { if (-not (DeepEqual $obj_a[$k] $obj_b[$k])) { return $false } }
+        return $true
+    }
+    if ($obj_a -is [PSCustomObject] -and $obj_b -is [PSCustomObject]) {
+        [String[]]$ks_a = ([PSCustomObject]$obj_a).PSObject.Properties.Name | Sort-Object
+        [String[]]$ks_b = ([PSCustomObject]$obj_b).PSObject.Properties.Name | Sort-Object
+        if (-not (DeepEqual $ks_a $ks_b)) { return $false }
+        foreach ($k in $ks_a) { if (-not (DeepEqual $obj_a.$k $obj_b.$k)) { return $false } }
+        return $true
+    }
+    if ($obj_a -is [Array] -and $obj_b -is [Array]) {
+        if ($obj_a.Count -ne $obj_b.Count) { return $false }
+        for ($i = 0; $i -lt $obj_a.Count; $i++) {
+            if (-not (DeepEqual $obj_a[$i] $obj_b[$i])) { return $false}
+        };  return $true
+    }
+    return $obj_a -eq $obj_b
+}
+
+# Filters out duplicate objects from an array
+function DeepUnique {
+    param ([Parameter(ValueFromPipeline)] [Object]$obj)
+    begin { [Array]$unique = @() }
+    process {
+        foreach ($e in $unique) { if (DeepEqual $obj $e) { return } }
+        $unique += $obj; Write-Output $obj
+    }
+}
 
 # Checks if `str` matches any of the `match_attempts`
 function  MatchesAny {
@@ -160,7 +194,8 @@ class NsxApiHandle {
             if ($_.nested_service_path) { $this.RipServicePorts($_.nested_service_path.Trim("/")) }
             else {
                 [String]$protocol = if ($_.alg -eq "FTP") { "TCP" } else { FirstNonNull @($_.l4_protocol, $_.protocol) }
-                [String[]]$ports = if ($protocol -match "ICMP") { FirstNonNull @($_.icmp_type, "8") } else { $_.destination_ports }
+                if ($protocol -match "ICMP") { $protocol = "ICMP" }
+                [String[]]$ports = if ($protocol -eq "ICMP") { FirstNonNull @($_.icmp_type, "8") } else { $_.destination_ports }
                 $ports | ForEach-Object { [PSCustomObject]@{ port = $_; protocol = $protocol } }
             }
         })
@@ -178,9 +213,9 @@ class NsxApiHandle {
     # Format Security Groups + Services of a given Rule for CIS
     [PSCustomObject] DeepRip ([PSCustomObject]$rule) {
         return [PSCustomObject]@{
-            services     = @($rule.services           | ForEach-Object { $this.RipService($_.Trim("/")) })
-            sources      = @($rule.source_groups      | ForEach-Object { $this.RipSourceGroup($_.Trim("/")) })
-            destinations = @($rule.destination_groups | ForEach-Object { $this.RipDestinationGroup($_.Trim("/")) })
+            services     = @($rule.services           | ForEach-Object { $this.RipService($_.Trim("/")) } | DeepUnique)
+            sources      = @($rule.source_groups      | ForEach-Object { $this.RipSourceGroup($_.Trim("/")) } | DeepUnique)
+            destinations = @($rule.destination_groups | ForEach-Object { $this.RipDestinationGroup($_.Trim("/")) } | DeepUnique)
         }
     }
 }
@@ -383,10 +418,12 @@ foreach ($tenant_s in $final_groups.Keys) {
         [PSCustomObject[]]$rules = @()
         foreach ($rule in $request_data.rules) {
             $svc_groups += $rule.services | ForEach-Object {
-                if ($_.svc_name) { $_.svc_name + " : " + (@($_.resolved | ForEach-Object { $_.protocol + ":" + $_.port }) -join ", ") }
+                # $_.svc_name + " : " + (@($_.resolved | ForEach-Object { $_.protocol + ":" + $_.port }) -join ", ")
+                if ($_.svc_name) { $_.svc_name }
             }
             $sec_groups += @($rule.sources; $rule.destinations) | ForEach-Object {
-                if ($_.grp_name) { $_.grp_name + " : " + (@($_.resolved | ForEach-Object { $_.ipv4 }) -join ", ") }
+                # $_.grp_name + " : " + (@($_.resolved | ForEach-Object { $_.ipv4 }) -join ", ")
+                if ($_.grp_name) { $_.grp_name }
             }
             $rules += [PSCustomObject]@{
                 description = $rule.description
@@ -440,9 +477,8 @@ LogLine "Done!"
 # - [x] Build up ruledeployer style Excel Sheets (one per tenant!)
 # - [x] How are we gonna resolve literal IPs? New Groups?
 #       ANSWER: Case by case. There's like 2 instances of this
+# - [x] Remove duplicate list entries
 
 # IMPORTANT: Change to literal "ANY" for security groups
 #            Service Group in descritpion
 #            FTP!!! (use service object!!)
-
-# IDC<cis_id>_<ind(1,)>
