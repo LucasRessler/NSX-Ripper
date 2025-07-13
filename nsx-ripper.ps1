@@ -63,39 +63,14 @@ function LogLine {
     LogInPlace $message; Write-Host $null
 }
 
-# Checks two objects for recursive equality
-function DeepEqual {
-    param ([Object]$obj_a, [Object]$obj_b)
-    if ($obj_a -is [Hashtable] -and $obj_b -is [Hashtable]) {
-        [String[]]$ks_a = $obj_a.Keys | Sort-Object
-        [String[]]$ks_b = $obj_b.Keys | Sort-Object
-        if (-not (DeepEqual $ks_a $ks_b)) { return $false }
-        foreach ($k in $ks_a) { if (-not (DeepEqual $obj_a[$k] $obj_b[$k])) { return $false } }
-        return $true
-    }
-    if ($obj_a -is [PSCustomObject] -and $obj_b -is [PSCustomObject]) {
-        [String[]]$ks_a = ([PSCustomObject]$obj_a).PSObject.Properties.Name | Sort-Object
-        [String[]]$ks_b = ([PSCustomObject]$obj_b).PSObject.Properties.Name | Sort-Object
-        if (-not (DeepEqual $ks_a $ks_b)) { return $false }
-        foreach ($k in $ks_a) { if (-not (DeepEqual $obj_a.$k $obj_b.$k)) { return $false } }
-        return $true
-    }
-    if ($obj_a -is [Array] -and $obj_b -is [Array]) {
-        if ($obj_a.Count -ne $obj_b.Count) { return $false }
-        for ($i = 0; $i -lt $obj_a.Count; $i++) {
-            if (-not (DeepEqual $obj_a[$i] $obj_b[$i])) { return $false}
-        };  return $true
-    }
-    return $obj_a -eq $obj_b
-}
-
 # Filters out duplicate objects from an array
 function DeepUnique {
     param ([Parameter(ValueFromPipeline)] [Object]$obj)
-    begin { [Array]$unique = @() }
+    begin { [Array]$seen = @() }
     process {
-        foreach ($e in $unique) { if (DeepEqual $obj $e) { return } }
-        $unique += $obj; Write-Output $obj
+        [String]$js = $obj | ConvertTo-Json -Depth 16 -Compress
+        if ($js -in $seen) { return }
+        $seen += $js; Write-Output $obj
     }
 }
 
@@ -213,9 +188,9 @@ class NsxApiHandle {
     # Format Security Groups + Services of a given Rule for CIS
     [PSCustomObject] DeepRip ([PSCustomObject]$rule) {
         return [PSCustomObject]@{
-            services     = @($rule.services           | ForEach-Object { $this.RipService($_.Trim("/")) } | DeepUnique)
-            sources      = @($rule.source_groups      | ForEach-Object { $this.RipSourceGroup($_.Trim("/")) } | DeepUnique)
-            destinations = @($rule.destination_groups | ForEach-Object { $this.RipDestinationGroup($_.Trim("/")) } | DeepUnique)
+            services     = @($rule.services           | ForEach-Object { $this.RipService($_.Trim("/")) })
+            sources      = @($rule.source_groups      | ForEach-Object { $this.RipSourceGroup($_.Trim("/")) })
+            destinations = @($rule.destination_groups | ForEach-Object { $this.RipDestinationGroup($_.Trim("/")) })
         }
     }
 }
@@ -428,9 +403,9 @@ foreach ($tenant_s in $final_groups.Keys) {
             $rules += [PSCustomObject]@{
                 description = $rule.description
                 entry_index = $rule.entry_index
-                rel_services = @($rule.services | ForEach-Object { $_.resolved })
-                rel_src_ipv4s = @($rule.sources | ForEach-Object { $_.resolved })
-                rel_dst_ipv4s = @($rule.destinations | ForEach-Object { $_.resolved })
+                rel_services = @($rule.services | ForEach-Object { $_.resolved } | DeepUnique)
+                rel_src_ipv4s = @($rule.sources | ForEach-Object { $_.resolved } | DeepUnique)
+                rel_dst_ipv4s = @($rule.destinations | ForEach-Object { $_.resolved } | DeepUnique)
             }
         }
 
